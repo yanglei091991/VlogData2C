@@ -1,0 +1,284 @@
+#////////////////////////////////////////////////////////////////////////
+# ChangeLog1: Use the new toolchain(version 3.3)
+# Changed by: yanglp   Revised by: xiesl
+# Should use the old disassembler for mmpu.
+
+#######  PLATFORM_Switch #########
+Platform=Sim # or FPGA
+
+
+##########  VCS_SET #############
+TestCase    = APCTest.sv
+TestConfig  = TestConfig.sv
+RTL_PATH    = ../../../../../RTL/
+TestIF      = ../../../Source/AXIBusIF.sv ../../../Source/CovSampleIF.sv
+TestTop     = ../../../Source/TestTop.sv 
+FPGA_Top    = ../../../FPGA_Work/migrate_source/FPGA_Top.v 
+FPGATestTop = ../../../FPGA_Work/migrate_source/TestTop.sv 
+FILE_LIST   = -f filelist.f ${TestConfig} ${TestCase} ${TestIF}
+VCS_INCLUDE = +incdir+directory+${RTL_PATH}/Include +incdir+directory+../../../Source/Include
+VCS_OPTION  = -full64 +plusarg_save -sverilog +lint=TFIPC-L  +lint=PCWM +v2k \
+							+libext+.v+.sv+.V+.vh+.vp+.h ${VCS_INCLUDE} ${VCS_DEFINE} +nospecify \
+							+notimingcheck -q +memcbk -l Run.log +vcs+initreg+config+../../../Source/init_conf
+VCS_DEFINE  = +define+${Platform} +define+UNIT_DELAY +define+no_warning \
+				      +define+TSMC_NO_TESTPINS_DEFAULT_VALUE_CHECK +define+TSMC_CM_UNIT_DELAY \
+							+define+VIRAGE_FAST_VERILOG +define+VIRAGE_IGNORE_RESET ${PLATFORM_Define} #+define+INITIALIZE_MEM 
+COV_OPTION  = -cm line+cond+fsm+tgl+branch -cm_line contassign -cm_cond allops
+
+MAKESIMCOREs = -j4
+#################################
+
+
+############################
+#File path 
+SDK_HOME=../../../../../../SDK
+UCP_HOME= ../../../../../../ucp_sdk/apc_tools_ima/bin
+
+############################
+#Test Pre-Process
+define GetDirName
+	@DIR_NAME=$(shell pwd | awk -F '/' '{print $$(NF-1)"_"$$NF}') 
+endef
+
+############################
+#Function to get the Dir-Name
+define TextPreProcess
+	@echo -e "\nBegin Text Pre-process..."
+	@if [ -f *.mc  ]; then \
+		cp -rf *.mc app.m.asm; \
+		label=`sed -n '/CallMacro/s/CallMacro\ \(.*\)\ *;/\1/p' app.m.asm | sort -u`; \
+		for case in $${label}; do \
+		echo "label: $${case}..."; \
+			if [ -f ./include/$${case}.m.asm ]; then \
+				sed -n '/'$${case}'\ *:/,$$p' ./include/$${case}.m.asm > temp; \
+				sed -i '/CallMacro\ *'$${case}'/r temp' app.m.asm; \
+				rm -rf temp; \
+			else \
+				echo "there are no $${case} information in ./include"; \
+			fi; \
+		done; \
+		sed -i -e '/CallMacro/d' app.m.asm; \
+		echo -e "End Test Pre-process.\n"; \
+	else \
+		echo "there are no *.mc file in the working directory."; \
+	fi
+endef
+
+############################
+#Function to get the right filelist
+define GenFilelist
+	@echo "Generating APC filelist ... ";
+	@if [ ${Platform} = "Sim" ] ; then     \
+		sed 's/RTL/..\/..\/&/' ../../../Source/APE_RTL.f > filelist.f ;		\
+	elif [ ${Platform} = "FPGA" ] ; then  \
+		sed 's/RTL/..\/..\/&/' ../../../Source/APE_RTL.f > filelist.f ;		\
+		echo "../../../Source/fpga/DualRAM.v" >>  filelist.f ;		\
+		echo "../../../Source/fpga/SingleRAM.v" >>  filelist.f ;		\
+		echo "../../../Source/fpga/SingleRAM_WEM.v" >>  filelist.f ;		\
+	fi; \
+	sed '/^[./]*$$/d' -i filelist.f                           
+endef
+
+############################
+#Function to get the simulation IM and MIM content 
+#Process *.s.asm Assemble Code
+# assmeble the IM/MIM Instruction
+define AsIns_Pre
+	@if [ -f *.s.c ]; then \
+		../../../../../../SDK/apc/bin/clang          --target=ucps     -c             *.c      -o app.c.o;  \
+	elif [ -f *.s.asm ]; then \
+		../../../../../../SDK/apc/bin/llvm-mc-Pre         -arch=ucps       -filetype=obj *.s.asm  -o app.s.o;  \
+	else \
+		touch IM.data;\
+	fi;	
+	@if [ -f *.m.asm ]; then \
+		../../../../../../SDK/apc/bin/llvm-mc-Pre         -arch=ucpm       -filetype=obj  *.m.asm -o app.m.o;  \
+	else \
+		touch MIM.data;\
+	fi;
+endef
+
+define AsIns
+	@if [ -n "`find . -name '*.s.c'`" ]; then \
+		${UCP_HOME}/clang          --target=ucps     -c             *.c     -O2;  \
+	elif [ -f *.s.asm ]; then \
+		${UCP_HOME}/llvm-mc         -arch=ucps       -filetype=obj *.s.asm  -o app.s.o;  \
+	else \
+		touch IM.data;\
+	fi;	
+	@if [ -f *.m.asm ]; then \
+		${UCP_HOME}/llvm-mc         -arch=ucpm       -filetype=obj  *.m.asm -o app.m.o;  \
+	else \
+		touch MIM.data;\
+	fi;
+	@if [ -f __ucps_interrupt.S ]; then \
+		${UCP_HOME}/llvm-mc         -arch=ucps       -filetype=obj  __ucps_interrupt.S -o __ucps_interrupt.s.o;  \
+	fi;
+endef
+
+define LnkIns
+	@if [ -f *.s.asm ] && [ -f *.m.asm ]; then \
+		${UCP_HOME}/ld.gold         -T ../../../Source/UCP_ASM.m.ld      -o app.m.out  app.m.o; \
+		${UCP_HOME}/ld.gold         -T ../../../Source/UCP_ASM.s.ld      -o app.s.out  app.s.o  --just-symbols app.m.out; \
+	elif [ -n "`find . -name '*.s.o'`" ] && [ -f *.m.o ]; then \
+		${UCP_HOME}/ld.gold         -T ../../../Source/UCP_ASM.m.ld      -o app.m.out  app.m.o; \
+		${UCP_HOME}/clang           --target=ucps  -o app.c.out  *.s.o   -L{UCP_HOME}/../lib/clang/6.0.0/lib/ucps/ -leeprintf  -Wl,--just-symbols,app.m.out -v;\
+   elif  [ -f *.s.asm ]; then \
+		${UCP_HOME}/ld.gold         -T ../../../Source/UCP_ASM.s.ld      -o app.s.out  app.s.o; \
+   elif  [ -n "`find . -name '*.s.o'`" ]; then \
+		${UCP_HOME}/clang           --target=ucps  -o app.c.out  *.s.o  -L{UCP_HOME}/../lib/clang/6.0.0/lib/ucps/ -leeprintf;  \
+   elif  [ -f *.m.asm ] ; then \
+		${UCP_HOME}/ld.gold         -T ../../../Source/UCP_ASM_m.ld      -o app.m.out  app.m.o; \
+	else \
+		echo "file:: Makefile.sim--This Scalar and MicroCode Combination is not supported!!";\
+	fi;
+endef
+
+define DisAsIns
+	@if [ -f *.s.asm ] && [ -f *.m.asm ]; then \
+		${UCP_HOME}/llvm-objdump    -arch-name=ucps    -no-show-raw-insn    -disassemble  app.s.out    > app.s.dis; \
+	elif [ -n "`find . -name '*.s.o'`" ] && [ -f *.m.o ]; then \
+		${UCP_HOME}/llvm-objdump    -arch-name=ucps    -no-show-raw-insn    -disassemble  app.c.out    > app.c.asm; \
+		sed -i -e '/LBB/d' -e '/toRep/d' -e '/fromRep/d' app.c.asm; \
+		${UCP_HOME}/llvm-mc         -arch=ucps       -filetype=obj  app.c.asm -o app.c.asm.o;  \
+        elif  [ -f *.s.asm ]; then \
+		${UCP_HOME}/llvm-objdump    -arch-name=ucps    -no-show-raw-insn    -disassemble  app.s.out    > app.s.dis; \
+        elif  [ -n "`find . -name '*.s.o'`" ]; then \
+		${UCP_HOME}/llvm-objdump    -arch-name=ucps    -no-show-raw-insn    -disassemble  app.c.out    > app.c.asm; \
+		sed -i -e '/LBB/d' -e '/toRep/d' -e '/fromRep/d' app.c.asm; \
+		${UCP_HOME}/llvm-mc         -arch=ucps       -filetype=obj  app.c.asm -o app.c.asm.o;  \
+	else \
+		echo "file:: Makefile.sim--This Scalar and MicroCode Combination is not supported!!";\
+	fi;
+endef
+
+define GemInsData
+	@if [ -f *.s.asm ] && [ -f *.m.asm ]; then \
+		objcopy -I elf32-little -O verilog app.s.out IM.data;\
+		echo @3fffc f0 >> IM.data;\
+		echo @3fffd ff >> IM.data;\
+		echo @3fffe 02 >> IM.data;\
+		echo @3ffff 00 >> IM.data;\
+		objcopy -I elf32-little -O verilog app.m.out MIM.data;\
+	elif [ -n "`find . -name '*.s.o'`" ] && [ -f *.m.o ]; then \
+		objcopy -I elf32-little -O verilog app.c.out IM.data;\
+		echo @3fffc f0 >> IM.data;\
+		echo @3fffd ff >> IM.data;\
+		echo @3fffe 02 >> IM.data;\
+		echo @3ffff 00 >> IM.data;\
+		objcopy -I elf32-little -O verilog app.m.out MIM.data;\
+  elif  [ -f *.s.asm ] ; then \
+		objcopy -I elf32-little -O verilog app.s.out IM.data;\
+		echo @3fffc f0 >> IM.data;\
+		echo @3fffd ff >> IM.data;\
+		echo @3fffe 02 >> IM.data;\
+		echo @3ffff 00 >> IM.data;\
+    touch MIM.data;\
+  elif  [ -n "`find . -name '*.s.o'`" ] ; then \
+		objcopy -I elf32-little -O verilog app.c.out IM.data;\
+		echo @3fffc f0 >> IM.data;\
+		echo @3fffd ff >> IM.data;\
+		echo @3fffe 02 >> IM.data;\
+		echo @3ffff 00 >> IM.data;\
+    touch MIM.data;\
+  elif  [ -f *.m.asm ] ; then \
+		objcopy -I elf32-little -O verilog app.m.out MIM.data;\
+		echo "Attention !!!! No Scalar Code while there is MicroCode Instruction !!!!"; \
+    touch IM.data;\
+	else \
+    touch IM.data;\
+    touch MIM.data;\
+	fi;
+endef
+
+
+define GenMaPUData
+	if [ ! -f DM0.dat ]; then \
+		touch DM0.dat;\
+	fi;
+	if [ ! -f DM1.dat ]; then \
+		touch DM1.dat;\
+	fi;
+	if [ ! -f DM2.dat ]; then \
+		touch DM2.dat;\
+	fi;
+	if [ ! -f DM3.dat ]; then \
+		touch DM3.dat;\
+	fi;
+endef
+
+
+define Makeall
+	$(call GenFilelist)
+	vcs ${VCS_OPTION} -debug_all +define+DUMP_WAVES ${FILE_LIST} ${TestTop} -R
+endef
+
+define Makefast
+	$(call GenFilelist)
+	vcs ${VCS_OPTION} -debug_pp ${FILE_LIST} ${TestTop} -R
+endef
+
+define Makecov
+	$(call GenFilelist)
+	$(call GetDirName);  \
+	vcs ${VCS_OPTION} ${FILE_LIST} ${TestTop} ${COV_OPTION} -cm_hier ../../../Source/covScope.cfg -cm_dir ../../../Coverage/db/$$DIR_NAME -R
+endef
+
+define MakeSim
+	@python ../../../Script/Sim.py 2>&1 | tee sim.log
+	@make -C ${SDK_HOME}/Simulator/simsrc/ TESTFLAG=test ${MAKESIMCOREs} 2>&1 | tee -a sim.log
+	@${SDK_HOME}/Simulator/simsrc/bin/UCP_Me_Simulator_sim* 2>&1 | tee -a sim.log
+endef
+
+define MakeSimGUI
+	@make -C ${SDK_HOME}/Simulator/simsrc/ ${MAKESIMCOREs}
+	@${SDK_HOME}/Simulator/simsrc/bin/UCP_Me_Simulator_gui*
+endef
+
+
+define MakeStartGUI
+	@${SDK_HOME}/Simulator/DebGuiR1
+endef
+
+
+define Makecleansim
+	@make cleansim -C ${SDK_HOME}/Simulator/simsrc/
+	@make cleangui -C ${SDK_HOME}/Simulator/simsrc/
+endef
+
+
+define Makeclean
+	$(call ExcludeFiles)
+	@rm -rf *.lof  *.out  *.map  *.mmap  *.sct  *.tab  *.s  *.dis  *~  *.def *.xml 
+	@rm -rf *.daidir work  *.lib++ *~ *.rc csrc *.key filelist.f simv*
+	@rm -rf DVEfiles vc_hdrs.h urgReport *.rc *.vpd *.log
+	@rm -rf *.o *.sym *.data *.bak slot-*.txt PC_Line*.txt codes.txt UCPMDis.txt *.saif 
+	@rm -rf Simulator_*.dat saif.cmds Run_Cycle.dat *.elf app.c.asm
+	@rm -rf Executed_Pipeline.csv
+endef
+
+
+define MakeAPP
+	$(call AsIns)
+	$(call LnkIns)
+	$(call DisAsIns)
+	$(call GemInsData)
+endef
+#	$(call DisAsIns)
+#	$(call GenMaPUData)
+
+
+define ExcludeFiles
+	@if [ ! -s DM0.dat ]; then \
+		rm -rf DM0.dat;\
+	fi;
+	@if [ ! -s DM1.dat ]; then \
+		rm -rf DM1.dat;\
+	fi;
+	@if [ ! -s DM2.dat ]; then \
+		rm -rf DM2.dat;\
+	fi;
+	@if [ ! -s DM3.dat ]; then \
+		rm -rf DM3.dat;\
+	fi;
+endef
